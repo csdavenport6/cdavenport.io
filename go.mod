@@ -1,4 +1,4 @@
-module github.com/connordavenport/dev-lab/blog
+module github.com/csdavenport6/cdavenport.io
 
 go 1.24
 
