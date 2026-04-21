@@ -55,3 +55,19 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.tags.outputs.tags }}
+
+  deploy:
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger production redeploy
+        env:
+          DEPLOY_HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+          DEPLOY_HOOK_SECRET: ${{ secrets.DEPLOY_HOOK_SECRET }}
+        run: |
+          sig=$(printf '' | openssl dgst -sha256 -hmac "$DEPLOY_HOOK_SECRET" | awk '{print $2}')
+          curl --fail --show-error -sS -X POST \
+            -H "X-Hub-Signature-256: sha256=$sig" \
+            --data '' \
+            "$DEPLOY_HOOK_URL"
