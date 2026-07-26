@@ -1,6 +1,8 @@
 # cdavenport.io
 
-The Go blog that serves https://cdavenport.io. Reads Markdown posts with YAML frontmatter, renders them with Go `html/template` and `goldmark`, and embeds templates and static assets via `//go:embed`.
+The Go blog that serves https://cdavenport.io. Reads Markdown posts with YAML frontmatter and renders them with Go `html/template` and `goldmark`.
+
+Static assets (`static/`) are compiled into the binary with `//go:embed`. Templates (`templates/`) and posts (`posts/`) are **not** embedded; they are read from disk at startup. See [How files are served](#how-files-are-served).
 
 ## Run locally
 
@@ -25,12 +27,13 @@ docker compose -f compose.dev.yml up --build
 
 ## Deploy
 
-Push to `main`. CI builds, tags, and pushes an image to `ghcr.io/csdavenport6/cdavenport.io`, then signs a POST to `https://deploy.cdavenport.io/hooks/blog` to trigger a production redeploy. Secrets required in GitHub Actions:
+Push to `main`. CI runs `go test ./...`, then builds and pushes an image to `ghcr.io/csdavenport6/cdavenport.io`, tagged `:latest` and `:sha-<short-sha>`.
 
-- `DEPLOY_HOOK_URL`: e.g. `https://deploy.cdavenport.io/hooks/blog`
-- `DEPLOY_HOOK_SECRET`: HMAC secret shared with the server's `webhook.env`.
+Deployment is **pull-based**: the homelab's Komodo watches ghcr.io for a new `:latest` and redeploys the `blog` stack on its own poll interval. CI does not push to the server, so there are no deploy secrets and no inbound webhook. A push to `main` goes live once CI finishes and Komodo next polls.
 
-The deploy-webhook receiver lives in [csdavenport6/infra](https://github.com/csdavenport6/infra); see its [webhook runbook](https://github.com/csdavenport6/infra/blob/main/docs/webhook-runbook.md) for architecture, troubleshooting, and secret rotation.
+Homelab configuration lives in [csdavenport6/infra](https://github.com/csdavenport6/infra).
+
+> The old Digital Ocean droplet and signed-webhook deploy (`DEPLOY_HOOK_URL` / `DEPLOY_HOOK_SECRET`) was removed during the homelab migration. Those secrets are no longer read by CI and can be deleted from the repo settings.
 
 ## Writing posts
 
@@ -47,9 +50,40 @@ tags: ["go"]
 Post body in Markdown.
 ```
 
-## Rotating the deploy hook secret
+## How files are served
 
-1. Generate a new secret: `openssl rand -hex 32`.
-2. Update the value in 1Password (`infra BLOG_HOOK_SECRET`).
-3. Update the repo secret `DEPLOY_HOOK_SECRET`.
-4. Update `/etc/infra/webhook.env` on the droplet (`BLOG_HOOK_SECRET=<new>`), then `docker compose up -d webhook` in `~/infra`.
+The three asset directories reach production by two different routes. This matters when changing how files are served, because a mistake here can pass locally and still break production.
+
+| Directory | How it reaches production | Served by |
+| --- | --- | --- |
+| `static/` | Compiled into the binary by `//go:embed static` in `main.go` | `/static/` route |
+| `templates/` | `COPY templates/ /data/templates/` in the Dockerfile | Read from disk by `NewServer` |
+| `posts/` | `COPY posts/ /data/posts/` in the Dockerfile | Read from disk by `LoadPosts` |
+
+The Dockerfile deliberately does **not** copy `static/` into the runtime image, because the embed already put those files inside the binary.
+
+The consequence: `/static/` must be served from the embedded filesystem, never from disk.
+
+```go
+//go:embed static
+var staticFiles embed.FS
+
+staticFS, _ := fs.Sub(staticFiles, "static")
+mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+```
+
+Swapping that for a disk-backed server such as `http.Dir("static")` works locally, where the real `static/` folder sits next to the binary, and fails in the container, where it was never copied. The result is a site that serves HTML with every stylesheet and image returning 404: readable text, no styling.
+
+If the site ever renders as unstyled text again, check `/static/style.css` first:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' https://cdavenport.io/static/style.css
+```
+
+`200` means assets are fine and the problem is elsewhere. `404` means the embed or the `/static/` route is missing. Verify against the container, not just `go run .`:
+
+```sh
+docker build -t cdavenport.io .
+docker run --rm -p 8080:8080 cdavenport.io
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/static/style.css
+```
