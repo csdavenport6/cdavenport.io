@@ -72,18 +72,27 @@ staticFS, _ := fs.Sub(staticFiles, "static")
 mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 ```
 
-Swapping that for a disk-backed server such as `http.Dir("static")` works locally, where the real `static/` folder sits next to the binary, and fails in the container, where it was never copied. The result is a site that serves HTML with every stylesheet and image returning 404: readable text, no styling.
+Swapping that for a disk-backed server such as `http.Dir("static")` works locally, where the real `static/` folder sits next to the binary, and fails in the container, where it was never copied.
 
-If the site ever renders as unstyled text again, check `/static/style.css` first:
+### Diagnosing unstyled text
+
+Check the **Content-Type**, not the status code:
 
 ```sh
-curl -s -o /dev/null -w '%{http_code}\n' https://cdavenport.io/static/style.css
+curl -s -o /dev/null -w '%{content_type}\n' https://cdavenport.io/static/style.css
 ```
 
-`200` means assets are fine and the problem is elsewhere. `404` means the embed or the `/static/` route is missing. Verify against the container, not just `go run .`:
+- `text/css; charset=utf-8` means assets are fine and the problem is elsewhere.
+- `text/html; charset=utf-8` means the `/static/` route is missing.
+
+A missing `/static/` route does **not** produce a 404, which makes this failure easy to misdiagnose. `mux.HandleFunc("/", srv.HandleIndex)` registers `/` as a catch-all prefix in Go's `ServeMux`, so any path without a more specific route falls through to it. With `/static/` unregistered, a request for `style.css` is handled by `HandleIndex` and returns the homepage with `200 OK`. The browser tries to parse HTML as a stylesheet, silently discards it, and renders the page unstyled.
+
+Status code alone will tell you everything is fine. It is not.
+
+Verify against the container, not just `go run .`, since a disk-backed regression passes locally:
 
 ```sh
 docker build -t cdavenport.io .
 docker run --rm -p 8080:8080 cdavenport.io
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/static/style.css
+curl -s -o /dev/null -w '%{content_type}\n' http://127.0.0.1:8080/static/style.css
 ```
